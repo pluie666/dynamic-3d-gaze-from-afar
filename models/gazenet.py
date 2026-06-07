@@ -311,6 +311,39 @@ class GazeNet(pl.LightningModule):
         # Manual optimization
         self.automatic_optimization = False
 
+    def load_pretrained_hbnet(self, checkpoint_path: str, map_location: str = 'cpu'):
+        """
+        Load only HBNet weights from an original GAFA checkpoint.
+
+        The new RHFDGazeModule, TWIESN, and EMA modules have different
+        architecture from the original GazeModule, so their weights
+        cannot be transferred and will remain randomly initialized.
+
+        Args:
+            checkpoint_path: path to .pth checkpoint
+            map_location:    device to load weights to
+        """
+        state = torch.load(checkpoint_path, map_location=map_location)
+        if 'state_dict' in state:
+            state = state['state_dict']
+
+        # Filter to only HBNet keys
+        hbnet_state = {}
+        skipped = []
+        for k, v in state.items():
+            if k.startswith('hbnet.'):
+                hbnet_state[k] = v
+            else:
+                skipped.append(k)
+
+        # Load HBNet weights (strict=True because only HBNet keys are passed)
+        self.hbnet.load_state_dict(hbnet_state, strict=True)
+
+        print(f"Loaded {len(hbnet_state)} HBNet parameters")
+        print(f"Skipped {len(skipped)} GazeModule parameters (architecture changed)")
+        print(f"New modules (RHFDGazeModule, TWIESN, EMA) are randomly initialized")
+        return self
+
     def forward(
         self,
         img: torch.Tensor,
