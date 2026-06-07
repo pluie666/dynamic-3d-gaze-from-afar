@@ -327,12 +327,13 @@ class GazeNet(pl.LightningModule):
         if 'state_dict' in state:
             state = state['state_dict']
 
-        # Filter to only HBNet keys
+        # Filter to only HBNet keys, strip "hbnet." prefix
         hbnet_state = {}
         skipped = []
         for k, v in state.items():
             if k.startswith('hbnet.'):
-                hbnet_state[k] = v
+                # Strip the "hbnet." prefix for loading into self.hbnet
+                hbnet_state[k[len('hbnet.'):]] = v
             else:
                 skipped.append(k)
 
