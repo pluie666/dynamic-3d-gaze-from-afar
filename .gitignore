@@ -1,0 +1,32 @@
+# Data (large files, downloaded separately)
+data/
+*.tar.gz
+*.zip
+
+# Model weights
+models/weights/*.pth
+!models/weights/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Output
+output/
+checkpoints/
+lightning_logs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Conda/Singularity
+*.sif
+.claude/
+*.lnk
