@@ -521,16 +521,16 @@ class GazeNet(pl.LightningModule):
             }, prog_bar=True)
         else:
             # Kappa training steps (every 10th batch)
-            loss_vmf = (
+            loss = (
                 compute_kappa_vMF3_loss(head_res, batch['head_dir']) +
                 compute_kappa_vMF3_loss(body_res, batch['body_dir']) +
                 compute_kappa_vMF3_loss(gaze_res, batch['gaze_dir'])
             ) / 3.0
 
             opt_kappa.zero_grad()
-            self.manual_backward(loss_vmf)
+            self.manual_backward(loss)
             opt_kappa.step()
-            self.log_dict({"kappa_loss": loss_vmf}, prog_bar=True)
+            self.log_dict({"kappa_loss": loss}, prog_bar=True)
 
         mae = compute_mae(gaze_res['direction'], batch['gaze_dir'])
         self.log('train_mae', mae)
