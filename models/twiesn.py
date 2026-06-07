@@ -121,7 +121,12 @@ class TWIESN(nn.Module):
         if spectral_radius > 0:
             with torch.no_grad():
                 eigenvalues = torch.linalg.eigvals(W_res)
-                max_eigenvalue = torch.max(torch.abs(eigenvalues)).real
+                # torch.abs handles complex dtypes automatically
+                # Use .float() to convert complex abs result to real tensor
+                abs_vals = torch.abs(eigenvalues)
+                if abs_vals.is_complex():
+                    abs_vals = abs_vals.real
+                max_eigenvalue = torch.max(abs_vals)
                 if max_eigenvalue > 0:
                     W_res = W_res * (spectral_radius / max_eigenvalue)
         self.register_buffer('W_res', W_res)
