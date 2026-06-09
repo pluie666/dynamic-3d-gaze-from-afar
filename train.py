@@ -30,19 +30,22 @@ def train(opt):
     )
 
     # default training dataset
-    train_exp_names = [
-        'library/1026_3',
-        'library/1028_2',
-        'library/1028_5',
-        'lab/1013_1',
-        'lab/1014_1',
-        'kitchen/1022_4',
-        'kitchen/1015_4',
-        'living_room/004',
-        'living_room/005',
-        'courtyard/004',
-        'courtyard/005',
-    ]
+    if opt.quick:
+        train_exp_names = ['living_room/004']
+    else:
+        train_exp_names = [
+            'library/1026_3',
+            'library/1028_2',
+            'library/1028_5',
+            'lab/1013_1',
+            'lab/1014_1',
+            'kitchen/1022_4',
+            'kitchen/1015_4',
+            'living_room/004',
+            'living_room/005',
+            'courtyard/004',
+            'courtyard/005',
+        ]
 
     random.shuffle(train_exp_names)
     dset = create_gafa_dataset(
@@ -67,10 +70,10 @@ def train(opt):
     )
 
     train_loader = DataLoader(
-        train_dset, batch_size=32, num_workers=4, pin_memory=True, shuffle=True
+        train_dset, batch_size=opt.batch_size, num_workers=4, pin_memory=True, shuffle=True
     )
     val_loader = DataLoader(
-        validation_dset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True
+        validation_dset, batch_size=opt.batch_size, shuffle=False, num_workers=4, pin_memory=True
     )
 
     trainer.fit(model, train_loader, val_loader)
@@ -83,6 +86,11 @@ if __name__ == "__main__":
     parser.add_argument("--n_frames", type=int, default=7)
     parser.add_argument("--checkpoint", type=str, default="output/")
     parser.add_argument("--gpus", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument(
+        "--quick", action="store_true", default=False,
+        help="Quick debug mode: single scene + fewer epochs"
+    )
 
     # RHFD features
     parser.add_argument(
