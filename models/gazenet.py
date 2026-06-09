@@ -241,7 +241,7 @@ class GazeNet(pl.LightningModule):
         twiesn_spectral_radius: float = 0.9,
         # EMA flags
         use_ema: bool = True,
-        ema_alpha: float = 0.3,
+        ema_alpha: float = 0.6,
         use_adaptive_ema: bool = False,
         # Probability head
         n_anchors: int = 64,
@@ -262,7 +262,7 @@ class GazeNet(pl.LightningModule):
             'cos': 1.0,
             'vmf': 0.5,
             'prob': 0.3,
-            'smoothness': 0.1,
+            'smoothness': 0.01,
         }
 
         # ---- Submodules ----
@@ -403,33 +403,14 @@ class GazeNet(pl.LightningModule):
         # Save initial LSTM estimate for reference
         gaze_init = gaze_res['direction']  # [B, T, 3]
 
-        # ---- Stage 5: Exponential Smoothing (intermediate, optional) ----
+        # ---- Stage 5: TWIESN Temporal Smoothing ----
         gaze_current = gaze_init
-        if self.use_ema and not self.use_twiesn:
-            # Only apply EMA once if TWIESN is disabled
-            if self.use_adaptive_ema:
-                ema_res = self.ema(gaze_current, gaze_res['kappa'])
-            else:
-                ema_res = self.ema(gaze_current)
-            gaze_current = ema_res['smoothed']
-
-        # ---- Stage 6: TWIESN Temporal Smoothing ----
         if self.use_twiesn:
-            # Optionally apply intermediate EMA before TWIESN
-            if self.use_ema:
-                if self.use_adaptive_ema:
-                    ema_intermediate = self.ema(gaze_current, gaze_res['kappa'])
-                else:
-                    ema_intermediate = self.ema(gaze_current)
-                twiesn_input = ema_intermediate['smoothed']
-            else:
-                twiesn_input = gaze_current
-
-            twiesn_res = self.twiesn(twiesn_input)
+            twiesn_res = self.twiesn(gaze_current)
             gaze_twiesn = twiesn_res['direction']  # [B, T, 3]
 
-            # Residual connection: combine TWIESN output with initial estimate
-            gaze_refined = 0.7 * gaze_twiesn + 0.3 * gaze_init
+            # Residual connection: preserve some of the original signal
+            gaze_refined = 0.5 * gaze_twiesn + 0.5 * gaze_init
             gaze_refined = gaze_refined / (
                 torch.norm(gaze_refined, dim=-1, keepdim=True) + 1e-8
             )
@@ -438,13 +419,13 @@ class GazeNet(pl.LightningModule):
             gaze_res['direction_init'] = gaze_init
             gaze_current = gaze_refined
 
-        # ---- Stage 7: Final Exponential Smoothing ----
-        if self.use_ema and self.use_twiesn:
+        # ---- Stage 6: Final EMA (single pass) ----
+        if self.use_ema:
             if self.use_adaptive_ema:
-                ema_final = self.ema(gaze_current, gaze_res['kappa'])
+                ema_res = self.ema(gaze_current, gaze_res['kappa'])
             else:
-                ema_final = self.ema(gaze_current)
-            gaze_current = ema_final['smoothed']
+                ema_res = self.ema(gaze_current)
+            gaze_current = ema_res['smoothed']
 
         # Update final direction
         gaze_res['direction'] = gaze_current
