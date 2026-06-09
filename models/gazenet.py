@@ -453,10 +453,10 @@ class GazeNet(pl.LightningModule):
 
     def configure_optimizers(self):
         opt_direction = torch.optim.Adam(
-            filter(lambda p: p.requires_grad, self.parameters()), lr=1e-4
+            filter(lambda p: p.requires_grad, self.parameters()), lr=5e-5
         )
         opt_kappa = torch.optim.Adam(
-            filter(lambda p: p.requires_grad, self.parameters()), lr=1e-4
+            filter(lambda p: p.requires_grad, self.parameters()), lr=5e-5
         )
         return opt_direction, opt_kappa
 
@@ -494,6 +494,7 @@ class GazeNet(pl.LightningModule):
 
             opt_direction.zero_grad()
             self.manual_backward(loss)
+            self.clip_gradients(opt_direction, gradient_clip_val=1.0, gradient_clip_algorithm='norm')
             opt_direction.step()
 
             self.log_dict({
@@ -510,6 +511,7 @@ class GazeNet(pl.LightningModule):
 
             opt_kappa.zero_grad()
             self.manual_backward(loss)
+            self.clip_gradients(opt_kappa, gradient_clip_val=1.0, gradient_clip_algorithm='norm')
             opt_kappa.step()
             self.log_dict({"kappa_loss": loss}, prog_bar=True)
 
