@@ -3,6 +3,10 @@ import torch.nn.functional as F
 
 
 def vMF3_log_likelihood(y_true, mu_pred, kappa_pred):
+    # Clamp kappa to prevent numerical overflow
+    # kappa < 0.01: exp(-2*kappa) ≈ 1, causing log(~0) → inf
+    # kappa > 150: overflow risk in exp
+    kappa_pred = torch.clamp(kappa_pred, min=0.05, max=150.0)
     cosin_dist = torch.sum(y_true * mu_pred, dim=1)
     log_likelihood = kappa_pred * cosin_dist + torch.log(kappa_pred) - torch.log(1 - torch.exp(-2*kappa_pred)) - kappa_pred
 
