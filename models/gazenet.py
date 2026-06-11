@@ -467,6 +467,11 @@ class GazeNet(pl.LightningModule):
 
         gaze_res, head_res, body_res = self.forward(image, head_mask, body_dv)
 
+        # NaN detection: skip this batch if any output is NaN
+        if torch.isnan(gaze_res['direction']).any() or torch.isnan(gaze_res['kappa']).any():
+            self.log('nan_batch', 1.0)
+            return torch.tensor(0.0, requires_grad=True, device=self.device)
+
         opt_direction, opt_kappa = self.optimizers()
 
         if batch_idx % 10 != 0:
