@@ -109,10 +109,12 @@ class RHFDGazeModule(pl.LightningModule):
         use_probability_head: bool = True,
         use_rhfd_features: bool = True,
         rhfd_fusion_dim: int = 16,
+        use_flat_head: bool = True,
     ):
         super().__init__()
         assert n_frames % 2 == 1
         self.n_frames = n_frames
+        self.use_flat_head = use_flat_head
         self.use_probability_head = use_probability_head
         self.use_rhfd_features = use_rhfd_features
         self.n_anchors = n_anchors
@@ -154,6 +156,22 @@ class RHFDGazeModule(pl.LightningModule):
             nn.Linear(64, 1),
             nn.Softplus(),
         )
+
+        # Flat head: matches original GazeModule architecture
+        # Flatten T*256 → FC → T*3 (direction) or T (kappa)
+        if use_flat_head:
+            flat_input_dim = lstm_output_dim * n_frames  # 256 * 7 = 1792
+            self._flat_direction_layer = nn.Sequential(
+                nn.Linear(flat_input_dim, 64),
+                nn.ReLU(),
+                nn.Linear(64, 3 * n_frames),
+            )
+            self._flat_kappa_layer = nn.Sequential(
+                nn.Linear(flat_input_dim, 64),
+                nn.ReLU(),
+                nn.Linear(64, n_frames),
+                nn.Softplus(),
+            )
 
     def forward(
         self,
@@ -200,10 +218,21 @@ class RHFDGazeModule(pl.LightningModule):
         # Gaze prediction via probability or direct head
         if self.use_probability_head and anchors is not None:
             gaze_output = self.gaze_head(lstm_out, anchors, hard=hard_mapping)
-            # kappa comes from the probability head's entropy-based estimator
+        elif self.use_flat_head:
+            # Match original GazeModule: flatten all frames → FC → reshape
+            fc_out = F.relu(lstm_out).reshape(lstm_out.shape[0], -1)  # [B, T*256]
+            direction = self._flat_direction_layer(fc_out)             # [B, T*3]
+            direction = direction.reshape(B, T, 3)
+            direction = direction / (torch.norm(direction, dim=-1, keepdim=True) + 1e-8)
+            kappa = self._flat_kappa_layer(fc_out).reshape(B, T, 1)   # [B, T, 1]
+            gaze_output = {
+                'direction': direction,
+                'kappa': kappa,
+                'probs': None,
+                'entropy': None,
+            }
         else:
             gaze_output = self.gaze_head(lstm_out)
-            # Use separate kappa layer for direct regression
             gaze_output['kappa'] = self.kappa_layer(lstm_out)
 
         gaze_output['hidden'] = lstm_out
