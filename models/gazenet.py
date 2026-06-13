@@ -109,7 +109,7 @@ class RHFDGazeModule(pl.LightningModule):
         use_probability_head: bool = True,
         use_rhfd_features: bool = True,
         rhfd_fusion_dim: int = 16,
-        use_flat_head: bool = True,
+        use_flat_head: bool = False,
     ):
         super().__init__()
         assert n_frames % 2 == 1
