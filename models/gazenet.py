@@ -338,7 +338,7 @@ class GazeNet(pl.LightningModule):
         self.register_buffer('anchors', anchors)
 
         # Manual optimization
-        self.automatic_optimization = True
+        self.automatic_optimization = False
 
     def load_pretrained_hbnet(self, checkpoint_path: str, map_location: str = 'cpu'):
         """
@@ -481,10 +481,13 @@ class GazeNet(pl.LightningModule):
     # =========================================================================
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(
+        opt_direction = torch.optim.Adam(
             filter(lambda p: p.requires_grad, self.parameters()), lr=5e-5
         )
-        return optimizer
+        opt_kappa = torch.optim.Adam(
+            filter(lambda p: p.requires_grad, self.parameters()), lr=5e-5
+        )
+        return opt_direction, opt_kappa
 
     def training_step(self, batch, batch_idx):
         image = batch['image']
@@ -493,41 +496,48 @@ class GazeNet(pl.LightningModule):
 
         gaze_res, head_res, body_res = self.forward(image, head_mask, body_dv)
 
-        # NaN detection: skip this batch if any output is NaN
-        if torch.isnan(gaze_res['direction']).any() or torch.isnan(gaze_res['kappa']).any():
-            self.log('nan_batch', 1.0)
-            return torch.tensor(0.0, requires_grad=True, device=self.device)
+        # NaN guard
+        if torch.isnan(gaze_res['direction']).any():
+            return None
 
-        # Unified loss: direction + kappa + smoothness
-        loss_cos = (
-            compute_basic_cos_loss(head_res, batch['head_dir']) +
-            compute_basic_cos_loss(body_res, batch['body_dir']) +
-            compute_basic_cos_loss(gaze_res, batch['gaze_dir'])
-        ) / 3.0
+        opt_direction, opt_kappa = self.optimizers()
 
-        loss_vmf = (
-            compute_kappa_vMF3_loss(head_res, batch['head_dir']) +
-            compute_kappa_vMF3_loss(body_res, batch['body_dir']) +
-            compute_kappa_vMF3_loss(gaze_res, batch['gaze_dir'])
-        ) / 3.0
+        if batch_idx % 10 != 0:
+            # Direction training steps
+            loss_cos = (
+                compute_basic_cos_loss(head_res, batch['head_dir']) +
+                compute_basic_cos_loss(body_res, batch['body_dir']) +
+                compute_basic_cos_loss(gaze_res, batch['gaze_dir'])
+            ) / 3.0
 
-        loss_smooth = compute_temporal_smoothness_loss(gaze_res['direction'])
+            loss_smooth = compute_temporal_smoothness_loss(gaze_res['direction'])
+            loss = loss_cos + 0.01 * loss_smooth
 
-        loss = loss_cos + 0.5 * loss_vmf + 0.01 * loss_smooth
+            opt_direction.zero_grad()
+            self.manual_backward(loss)
+            self.clip_gradients(opt_direction, gradient_clip_val=1.0, gradient_clip_algorithm='norm')
+            opt_direction.step()
 
-        # Probability loss
-        if self.use_probability_head and gaze_res.get('probs') is not None:
-            loss_prob = compute_gaze_probability_loss(
-                gaze_res['probs'], batch['gaze_dir'], self.anchors
-            )
-            loss = loss + 0.3 * loss_prob
-            self.log_dict({"prob_loss": loss_prob}, prog_bar=True)
+            self.log_dict({
+                "direction_loss": loss_cos,
+                "smoothness_loss": loss_smooth,
+            }, prog_bar=True)
+        else:
+            # Kappa training steps (every 10th batch)
+            loss = (
+                compute_kappa_vMF3_loss(head_res, batch['head_dir']) +
+                compute_kappa_vMF3_loss(body_res, batch['body_dir']) +
+                compute_kappa_vMF3_loss(gaze_res, batch['gaze_dir'])
+            ) / 3.0
 
-        self.log_dict({
-            "direction_loss": loss_cos,
-            "kappa_loss": loss_vmf,
-            "smoothness_loss": loss_smooth,
-        }, prog_bar=True)
+            if torch.isnan(loss):
+                return None
+
+            opt_kappa.zero_grad()
+            self.manual_backward(loss)
+            self.clip_gradients(opt_kappa, gradient_clip_val=1.0, gradient_clip_algorithm='norm')
+            opt_kappa.step()
+            self.log_dict({"kappa_loss": loss}, prog_bar=True)
 
         mae = compute_mae(gaze_res['direction'], batch['gaze_dir'])
         self.log('train_mae', mae)
