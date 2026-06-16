@@ -7,27 +7,30 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader, Subset
 
 from dataloader.gafa import create_gafa_dataset
-from models.gazenet import GazeNet
+from models.gazenet import GazeNet, SimpleRHFDGazeNet
 
 
 def train(opt):
-    model = GazeNet(
-        n_frames=opt.n_frames,
-        # RHFD features
-        use_rhfd_features=opt.use_rhfd_features,
-        use_probability_head=opt.use_probability_head,
-        # TWIESN
-        use_twiesn=opt.use_twiesn,
-        twiesn_reservoir_dim=opt.twiesn_reservoir_dim,
-        twiesn_tchebichef_order=opt.twiesn_tchebichef_order,
-        twiesn_spectral_radius=opt.twiesn_spectral_radius,
-        # EMA
-        use_ema=opt.use_ema,
-        ema_alpha=opt.ema_alpha,
-        use_adaptive_ema=opt.use_adaptive_ema,
-        # Probability head
-        n_anchors=opt.n_anchors,
-    )
+    if opt.simple:
+        model = SimpleRHFDGazeNet(n_frames=opt.n_frames)
+    else:
+        model = GazeNet(
+            n_frames=opt.n_frames,
+            # RHFD features
+            use_rhfd_features=opt.use_rhfd_features,
+            use_probability_head=opt.use_probability_head,
+            # TWIESN
+            use_twiesn=opt.use_twiesn,
+            twiesn_reservoir_dim=opt.twiesn_reservoir_dim,
+            twiesn_tchebichef_order=opt.twiesn_tchebichef_order,
+            twiesn_spectral_radius=opt.twiesn_spectral_radius,
+            # EMA
+            use_ema=opt.use_ema,
+            ema_alpha=opt.ema_alpha,
+            use_adaptive_ema=opt.use_adaptive_ema,
+            # Probability head
+            n_anchors=opt.n_anchors,
+        )
 
     # default training dataset
     if opt.quick:
@@ -86,10 +89,14 @@ if __name__ == "__main__":
     parser.add_argument("--n_frames", type=int, default=7)
     parser.add_argument("--checkpoint", type=str, default="output/")
     parser.add_argument("--gpus", type=int, default=1)
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument(
         "--quick", action="store_true", default=False,
         help="Quick debug mode: single scene + fewer epochs"
+    )
+    parser.add_argument(
+        "--simple", action="store_true", default=False,
+        help="Use SimpleRHFDGazeNet (minimal stable enhancement: only Gf+Gd channels)"
     )
 
     # RHFD features
