@@ -25,13 +25,8 @@ def get_rotation(vec1, vec2):
     v_skew[:, 2, 0] = -v[:, 1]
     v_skew[:, 2, 1] = v[:, 0]
     # Prevent division by zero when vectors are parallel (s² ≈ 0)
-    # When parallel, R should be identity (or 180° rotation if opposite)
-    s_sq = torch.sum(v**2, dim=1, keepdim=True)
-    s_sq = torch.clamp(s_sq, min=1e-8)
-    is_parallel = s_sq < 1e-6  # vectors too close to parallel
+    s_sq = torch.sum(v**2, dim=1, keepdim=True) + 1e-8
     skew_prod = (v_skew @ v_skew) * ((1 - c) / s_sq).unsqueeze(-1)
-    # For (near) parallel vectors, use identity (no rotation needed)
-    skew_prod[is_parallel.expand(-1, 3, 3)] = 0.0
     R = torch.eye(3, dtype=v.dtype, device=v.device).repeat(n_batch, 1, 1) + v_skew + skew_prod
 
     return R
