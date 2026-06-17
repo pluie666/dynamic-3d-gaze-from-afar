@@ -1,4 +1,5 @@
 import argparse
+import os
 import random
 import numpy as np
 import torch
@@ -13,6 +14,12 @@ from models.gazenet import GazeNet, SimpleRHFDGazeNet
 def train(opt):
     if opt.simple:
         model = SimpleRHFDGazeNet(n_frames=opt.n_frames)
+        # Load pretrained HBNet weights
+        if opt.weights and os.path.exists(opt.weights):
+            model.load_pretrained_hbnet(opt.weights)
+            print(f"Loaded HBNet weights from {opt.weights}")
+        else:
+            print("WARNING: No pretrained weights found, HBNet randomly initialized")
     else:
         model = GazeNet(
             n_frames=opt.n_frames,
@@ -97,6 +104,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--simple", action="store_true", default=False,
         help="Use SimpleRHFDGazeNet (minimal stable enhancement: only Gf+Gd channels)"
+    )
+    parser.add_argument(
+        "--weights", type=str, default="./models/weights/gazenet_GAFA.pth",
+        help="Path to pretrained GAFA checkpoint (for HBNet weights)"
     )
 
     # RHFD features
