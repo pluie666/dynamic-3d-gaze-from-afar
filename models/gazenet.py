@@ -704,10 +704,8 @@ class SimpleRHFDGazeNet(pl.LightningModule):
         head_outputs, body_outputs = self.hbnet(img, head_mask, body_dv)
 
         # RHFD features from head direction
-        _, _, rhfd_raw = self.rhfd_extractor(head_outputs['direction'])
-        # Take only first 2 dims (gf, gd) from the fusion output
-        gf_features, gd_features = rhfd_raw[:, :, :1], rhfd_raw[:, :, 1:2]
-        rhfd_concat = torch.cat([gf_features, gd_features], dim=-1)  # [B,T,2]
+        gf, gd, _ = self.rhfd_extractor(head_outputs['direction'])
+        rhfd_concat = torch.cat([gf, gd], dim=-1)  # [B,T,2]
 
         # Rotation normalization
         reference_rad = head_outputs['direction'][:, self.n_frames // 2]
