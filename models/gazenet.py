@@ -419,7 +419,11 @@ class GazeNet(pl.LightningModule):
         # ---- Stage 2: RHFD Feature Extraction ----
         gf_features, gd_features, rhfd_fusion = None, None, None
         if self.use_rhfd_features:
-            gf_features, gd_features, rhfd_fusion = self.rhfd_extractor(head_dir_raw)
+            with torch.no_grad():
+                gf_features, gd_features, rhfd_fusion = self.rhfd_extractor(head_dir_raw.detach())
+            gf_features = gf_features.detach()
+            gd_features = gd_features.detach()
+            rhfd_fusion = rhfd_fusion.detach()
 
         # ---- Stage 3: Rotation Normalization (unchanged) ----
         reference_rad = head_outputs['direction'][:, self.n_frames // 2]
@@ -703,9 +707,10 @@ class SimpleRHFDGazeNet(pl.LightningModule):
         # HBNet
         head_outputs, body_outputs = self.hbnet(img, head_mask, body_dv)
 
-        # RHFD features from head direction
-        gf, gd, _ = self.rhfd_extractor(head_outputs['direction'])
-        rhfd_concat = torch.cat([gf, gd], dim=-1)  # [B,T,2]
+        # RHFD features from head direction (detached — computed features, no gradient)
+        with torch.no_grad():
+            gf, gd, _ = self.rhfd_extractor(head_outputs['direction'].detach())
+        rhfd_concat = torch.cat([gf, gd], dim=-1).detach()  # [B,T,2]
 
         # Rotation normalization
         reference_rad = head_outputs['direction'][:, self.n_frames // 2]
