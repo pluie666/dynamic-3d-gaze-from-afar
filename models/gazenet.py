@@ -39,18 +39,18 @@ from models.smoothing import ExponentialSmoothing, AdaptiveExponentialSmoothing
 class GazeModule(pl.LightningModule):
     """Original GAFA gaze module with optional RHFD feature channels.
 
-    Input: concatenated [body_dir(3), head_dir(3), + opt rhfd(2)] per timestep.
+    Input: concatenated [body_dir(3), head_dir(3), [+ rhfd(N)]] per timestep.
     Architecture: LSTM(128, bidirectional, 2 layers) → flatten → FC → direction + kappa.
     """
 
-    def __init__(self, n_frames, n_hidden=128, use_rhfd=False):
+    def __init__(self, n_frames, n_hidden=128, use_rhfd=False, rhfd_dim=0):
         super().__init__()
         assert n_frames % 2 == 1
         self.n_frames = n_frames
         self.use_rhfd = use_rhfd
 
-        # Input: body_dir(3) + head_dir(3) [+ gf(1) + gd(1)]
-        lstm_input_dim = 6 + (2 if use_rhfd else 0)
+        # Input: body_dir(3) + head_dir(3) [+ rhfd features]
+        lstm_input_dim = 6 + (rhfd_dim if use_rhfd else 0)
 
         self.lstm = nn.LSTM(lstm_input_dim, n_hidden, bidirectional=True, num_layers=2)
         self.direction_layer = nn.Sequential(
@@ -672,12 +672,13 @@ class GazeNet(pl.LightningModule):
 class SimpleRHFDGazeNet(pl.LightningModule):
     """
     Minimal RHFD-enhanced gaze network using the proven original GazeModule
-    architecture with 2 extra input channels (Gf + Gd).
+    architecture with 5 extra input channels (Gf + Gd + Ga + Gv + Gs).
 
     NO TWIESN, NO EMA, NO probability head — just the reliable GAFA pipeline
-    enhanced with RHFD fixation frequency and density features.
+    enhanced with RHFD fixation frequency, density, head stability,
+    head-body correlation, and spatial entropy features.
 
-    This is designed for stable multi-scene training.
+    Features weight decay + cosine LR schedule to combat overfitting.
     """
 
     def __init__(self, n_frames: int = 7):
@@ -685,7 +686,7 @@ class SimpleRHFDGazeNet(pl.LightningModule):
         self.n_frames = n_frames
 
         self.hbnet = HBNet()
-        self.gazemodule = GazeModule(n_frames, use_rhfd=True)
+        self.gazemodule = GazeModule(n_frames, use_rhfd=True, rhfd_dim=5)
         self.rhfd_extractor = RHFDFeatureExtractor(window_size=3)
 
         self.automatic_optimization = False
@@ -707,10 +708,13 @@ class SimpleRHFDGazeNet(pl.LightningModule):
         # HBNet
         head_outputs, body_outputs = self.hbnet(img, head_mask, body_dv)
 
-        # RHFD features from head direction (detached — computed features, no gradient)
+        # RHFD features from head direction + body velocity (detached)
         with torch.no_grad():
-            gf, gd, _ = self.rhfd_extractor(head_outputs['direction'].detach())
-        rhfd_concat = torch.cat([gf, gd], dim=-1).detach()  # [B,T,2]
+            features = self.rhfd_extractor(
+                head_outputs['direction'].detach(),
+                body_dv.detach(),
+            )
+        rhfd_concat = features['concat'].detach()  # [B,T,5]
 
         # Rotation normalization
         reference_rad = head_outputs['direction'][:, self.n_frames // 2]
@@ -735,13 +739,18 @@ class SimpleRHFDGazeNet(pl.LightningModule):
         return gaze_res, head_outputs, body_outputs
 
     def configure_optimizers(self):
-        opt_direction = torch.optim.Adam(
-            filter(lambda p: p.requires_grad, self.parameters()), lr=1e-4
+        opt_direction = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, self.parameters()),
+            lr=1e-4, weight_decay=1e-4
         )
-        opt_kappa = torch.optim.Adam(
-            filter(lambda p: p.requires_grad, self.parameters()), lr=1e-4
+        opt_kappa = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, self.parameters()),
+            lr=1e-4, weight_decay=1e-4
         )
-        return opt_direction, opt_kappa
+        # Cosine annealing over training steps
+        sched_direction = torch.optim.lr_scheduler.CosineAnnealingLR(opt_direction, T_max=100000)
+        sched_kappa = torch.optim.lr_scheduler.CosineAnnealingLR(opt_kappa, T_max=100000)
+        return [opt_direction, opt_kappa], [sched_direction, sched_kappa]
 
     def training_step(self, batch, batch_idx):
         image = batch['image']

@@ -1,174 +1,232 @@
 """
 RHFD (Refined Hidden Follower Detection) Gaze Feature Extraction Module.
 
-Extracts two key gaze-related temporal features from head direction sequences:
-  - Gf (Gaze Fixation Frequency): frame-to-frame angular velocity of gaze
-  - Gd (Gaze Density): spatial concentration of gaze points within a sliding window
+Extracts five gaze-related temporal features from head/body sequences:
+  - Gf (Gaze Fixation Frequency): frame-to-frame angular velocity
+  - Gd (Gaze Density): spatial concentration within a sliding window
+  - Ga (Gaze-Head Alignment Stability): head direction variance
+  - Gv (Gaze-Velocity Correlation): head-body motion coupling
+  - Gs (Gaze Spatial Entropy): directional spread on sphere
 
-These features are fused and fed as additional channels to the GazeModule LSTM.
+These features are computed purely from observables (head_dir, body_dv),
+then concatenated as extra channels to the GazeModule LSTM input.
+All acos-based features are masked with torch.no_grad() by the caller
+to prevent gradient explosion through boundary gradients.
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 class GazeFixationFrequency(nn.Module):
-    """
-    Compute gaze fixation frequency (Gf) from head direction sequences.
-
-    Gf measures the angular velocity of gaze direction changes.
-    Higher Gf → more frequent gaze shifts (scanning behavior).
-    Lower Gf → more stable fixation.
-    """
+    """Gf: angular velocity of head direction changes (rad/step)."""
 
     def __init__(self, eps: float = 1e-8):
         super().__init__()
         self.eps = eps
 
     def forward(self, head_dir: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            head_dir: [B, T, 3] normalized head direction vectors
-
-        Returns:
-            gf_features: [B, T, 1] fixation frequency per frame
-        """
         B, T, D = head_dir.shape
-
-        # Compute cosine similarity between adjacent frames
-        # head_dir[:, :-1] * head_dir[:, 1:] → [B, T-1]
         cos_angle = torch.sum(head_dir[:, :-1] * head_dir[:, 1:], dim=-1)
         cos_angle = torch.clamp(cos_angle, -1.0 + self.eps, 1.0 - self.eps)
-
-        # Angular difference in radians
         angular_diff = torch.acos(cos_angle)  # [B, T-1]
-
-        # Pad to T frames: first frame has 0 velocity
         padding = torch.zeros(B, 1, device=head_dir.device, dtype=angular_diff.dtype)
         angular_diff_padded = torch.cat([padding, angular_diff], dim=1)  # [B, T]
-
-        # Normalize by max expected angular velocity (π radians)
-        gf = angular_diff_padded / torch.pi  # [B, T]
-
-        return gf.unsqueeze(-1)  # [B, T, 1]
+        return (angular_diff_padded / torch.pi).unsqueeze(-1)  # [B, T, 1]
 
 
 class GazeDensity(nn.Module):
-    """
-    Compute gaze density (Gd) from head direction sequences.
-
-    Gd measures spatial concentration of gaze within a temporal window.
-    High density → person is focusing on a narrow region.
-    """
+    """Gd: mean cosine similarity with neighbors within a window."""
 
     def __init__(self, window_size: int = 3):
-        """
-        Args:
-            window_size: sliding window size for density estimation (should be odd)
-        """
         super().__init__()
         assert window_size % 2 == 1, "window_size must be odd"
         self.window_size = window_size
         self.half_window = window_size // 2
 
     def forward(self, head_dir: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            head_dir: [B, T, 3] normalized head direction vectors
-
-        Returns:
-            gd_features: [B, T, 1] gaze density per frame
-        """
         B, T, D = head_dir.shape
-
-        # Pad the sequence for sliding window
         head_padded = F.pad(
-            head_dir.transpose(1, 2),  # [B, 3, T]
-            (self.half_window, self.half_window),
-            mode='replicate'
+            head_dir.transpose(1, 2), (self.half_window, self.half_window), mode='replicate'
         ).transpose(1, 2)  # [B, T+2*hw, 3]
 
-        # For each frame, compute mean cosine similarity within window
         density_list = []
         for t in range(T):
             window = head_padded[:, t:t + self.window_size]  # [B, W, 3]
-            # Pairwise cosine similarity within window
             center = head_dir[:, t:t + 1]  # [B, 1, 3]
             similarities = torch.sum(center * window, dim=-1)  # [B, W]
-            # Mean similarity as density measure (excluding self which is 1.0)
-            density = similarities.mean(dim=-1, keepdim=True)  # [B, 1]
-            density_list.append(density)
-
+            density_list.append(similarities.mean(dim=-1, keepdim=True))
         gd = torch.stack(density_list, dim=1)  # [B, T, 1]
-
-        # Normalize: map from [-1, 1] similarity to [0, 1] density
-        gd = (gd + 1.0) / 2.0
-
-        return gd
+        return (gd + 1.0) / 2.0  # map [-1,1] → [0,1]
 
 
-class RHFDFeatureFusion(nn.Module):
+class HeadStability(nn.Module):
     """
-    Learnable fusion of Gf and Gd features into a compact representation
-    for injection into the GazeModule LSTM.
+    Ga (Gaze-Head Alignment Stability): local variance of head direction.
 
-    Architecture:
-        [Gf, Gd] → Linear(2, 16) → ReLU → Linear(16, 16) → output [B, T, 16]
+    Low variance → stable fixation (small region).
+    High variance → scanning / wandering gaze.
+    Computed as 1 - mean cosine similarity within a sliding window.
     """
 
-    def __init__(self, input_dim: int = 2, hidden_dim: int = 16, output_dim: int = 16):
+    def __init__(self, window_size: int = 3):
         super().__init__()
-        self.fusion_net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, output_dim),
-        )
+        assert window_size % 2 == 1
+        self.window_size = window_size
+        self.half_window = window_size // 2
 
-    def forward(self, gf: torch.Tensor, gd: torch.Tensor) -> torch.Tensor:
+    def forward(self, head_dir: torch.Tensor) -> torch.Tensor:
+        B, T, D = head_dir.shape
+        head_padded = F.pad(
+            head_dir.transpose(1, 2), (self.half_window, self.half_window), mode='replicate'
+        ).transpose(1, 2)
+
+        stability_list = []
+        for t in range(T):
+            window = head_padded[:, t:t + self.window_size]  # [B, W, 3]
+            # Mean direction within window
+            mean_dir = window.mean(dim=1, keepdim=True)  # [B, 1, 3]
+            mean_norm = mean_dir / (mean_dir.norm(dim=-1, keepdim=True) + 1e-8)
+            # Mean cosine similarity to mean direction → stability
+            sims = torch.sum(mean_norm * window, dim=-1)  # [B, W]
+            stability = sims.mean(dim=-1, keepdim=True)  # [B, 1]
+            stability_list.append(stability)
+        ga = torch.stack(stability_list, dim=1)  # [B, T, 1]
+        return ga  # range [-1,1], mapped later if needed
+
+
+class HeadBodyCorrelation(nn.Module):
+    """
+    Gv (Head-Body Motion Correlation): how tightly head motion follows body motion.
+
+    High → head tracks body movement direction (walking while looking).
+    Low → head independent of body (standing, scanning independently).
+    Computed as rolling Pearson r between |head_angle_change| and |body_velocity|.
+    """
+
+    def __init__(self, window_size: int = 3):
+        super().__init__()
+        assert window_size % 2 == 1
+        self.window_size = window_size
+        self.half_window = window_size // 2
+
+    def forward(self, head_dir: torch.Tensor, body_dv: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            gf: [B, T, 1] gaze fixation frequency
-            gd: [B, T, 1] gaze density
-
+            head_dir: [B, T, 3] normalized head direction
+            body_dv:  [B, T, 2] body velocity in image plane
         Returns:
-            fusion: [B, T, output_dim] fused RHFD feature
+            gv: [B, T, 1] correlation per frame
         """
-        combined = torch.cat([gf, gd], dim=-1)  # [B, T, 2]
-        fusion = self.fusion_net(combined)       # [B, T, output_dim]
-        return fusion
+        B, T, D = head_dir.shape
+        eps = 1e-8
+
+        # Head change magnitude (angular)
+        cos_angle = torch.sum(head_dir[:, :-1] * head_dir[:, 1:], dim=-1)
+        cos_angle = torch.clamp(cos_angle, -0.999, 0.999)
+        head_change = torch.acos(cos_angle)  # [B, T-1]
+        head_change = torch.cat([torch.zeros(B, 1, device=head_dir.device), head_change], dim=1)  # [B, T]
+
+        # Body velocity magnitude
+        body_mag = torch.norm(body_dv, dim=-1)  # [B, T]
+
+        # Pad for sliding window
+        head_pad = F.pad(head_change.unsqueeze(-1), (0, 0, self.half_window, self.half_window), mode='replicate')
+        body_pad = F.pad(body_mag.unsqueeze(-1), (0, 0, self.half_window, self.half_window), mode='replicate')
+
+        gv_list = []
+        for t in range(T):
+            h_win = head_pad[:, t:t + self.window_size, 0]  # [B, W]
+            b_win = body_pad[:, t:t + self.window_size, 0]  # [B, W]
+
+            h_centered = h_win - h_win.mean(dim=1, keepdim=True)
+            b_centered = b_win - b_win.mean(dim=1, keepdim=True)
+
+            cov = (h_centered * b_centered).sum(dim=1) / self.window_size
+            std_h = h_win.std(dim=1) + eps
+            std_b = b_win.std(dim=1) + eps
+            corr = cov / (std_h * std_b)
+            gv_list.append(corr.unsqueeze(-1))
+
+        gv = torch.stack(gv_list, dim=1)  # [B, T, 1]
+        return torch.clamp(gv, -1.0, 1.0)
+
+
+class SpatialEntropy(nn.Module):
+    """
+    Gs (Gaze Spatial Entropy): how uniformly head directions are distributed.
+
+    Low → directions clustered (focused attention).
+    High → directions spread out (broad scanning).
+    We approximate via mean pairwise cosine distance within a window.
+    """
+
+    def __init__(self, window_size: int = 3):
+        super().__init__()
+        assert window_size % 2 == 1
+        self.window_size = window_size
+        self.half_window = window_size // 2
+
+    def forward(self, head_dir: torch.Tensor) -> torch.Tensor:
+        B, T, D = head_dir.shape
+        head_padded = F.pad(
+            head_dir.transpose(1, 2), (self.half_window, self.half_window), mode='replicate'
+        ).transpose(1, 2)
+
+        entropy_list = []
+        for t in range(T):
+            window = head_padded[:, t:t + self.window_size]  # [B, W, 3]
+            # All pairwise cosine similarities within window
+            sims = torch.bmm(window, window.transpose(1, 2))  # [B, W, W]
+            # Upper triangle mean (excludes self-similarity)
+            mask = torch.triu(torch.ones(self.window_size, self.window_size, device=head_dir.device), diagonal=1).bool()
+            pair_sims = sims[:, mask]  # [B, N_pairs]
+            # Convert to dissimilarity → entropy proxy
+            dissimilarity = (1.0 - pair_sims).mean(dim=-1, keepdim=True)  # [B, 1]
+            entropy_list.append(dissimilarity)
+        gs = torch.stack(entropy_list, dim=1)  # [B, T, 1]
+        return gs  # [0, 2], lower = clustered
 
 
 class RHFDFeatureExtractor(nn.Module):
     """
-    Complete RHFD feature extraction pipeline.
+    Complete RHFD feature extraction: Gf + Gd + Ga + Gv + Gs.
 
-    Extracts Gf (fixation frequency), Gd (gaze density) from head direction
-    sequences, and fuses them into a compact feature representation for
-    downstream gaze estimation.
+    All features are computed from observable signals (head_dir, body_dv)
+    with no learnable parameters. Caller must wrap with torch.no_grad().
     """
 
-    def __init__(self, window_size: int = 3, fusion_hidden: int = 16, fusion_output: int = 16):
+    def __init__(self, window_size: int = 3):
         super().__init__()
         self.gf_extractor = GazeFixationFrequency()
         self.gd_extractor = GazeDensity(window_size=window_size)
-        self.fusion = RHFDFeatureFusion(
-            input_dim=2,
-            hidden_dim=fusion_hidden,
-            output_dim=fusion_output,
-        )
+        self.ga_extractor = HeadStability(window_size=window_size)
+        self.gv_extractor = HeadBodyCorrelation(window_size=window_size)
+        self.gs_extractor = SpatialEntropy(window_size=window_size)
 
-    def forward(self, head_dir: torch.Tensor):
+    def forward(self, head_dir: torch.Tensor, body_dv: torch.Tensor = None):
         """
         Args:
             head_dir: [B, T, 3] normalized head direction vectors
+            body_dv:  [B, T, 2] body velocity (optional, for Gv)
 
         Returns:
-            gf:       [B, T, 1] gaze fixation frequency
-            gd:       [B, T, 1] gaze density
-            fusion:   [B, T, fusion_output] fused RHFD features
+            dict with keys 'gf','gd','ga','gv','gs' each [B, T, 1],
+            and 'concat' [B, T, 5] for convenience.
         """
         gf = self.gf_extractor(head_dir)
         gd = self.gd_extractor(head_dir)
-        fusion = self.fusion(gf, gd)
-        return gf, gd, fusion
+        ga = self.ga_extractor(head_dir)
+        gs = self.gs_extractor(head_dir)
+        if body_dv is not None:
+            gv = self.gv_extractor(head_dir, body_dv)
+        else:
+            gv = torch.zeros_like(gf)
+
+        features = {
+            'gf': gf, 'gd': gd, 'ga': ga, 'gv': gv, 'gs': gs,
+            'concat': torch.cat([gf, gd, ga, gv, gs], dim=-1),
+        }
+        return features
