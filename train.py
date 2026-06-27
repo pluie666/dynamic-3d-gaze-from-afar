@@ -14,9 +14,9 @@ from models.gazenet import GazeNet, SimpleRHFDGazeNet
 def train(opt):
     if opt.simple:
         model = SimpleRHFDGazeNet(n_frames=opt.n_frames)
-        # Load pretrained HBNet weights
+        # Load pretrained HBNet weights (freeze to prevent overfitting)
         if opt.weights and os.path.exists(opt.weights):
-            model.load_pretrained_hbnet(opt.weights)
+            model.load_pretrained_hbnet(opt.weights, freeze=opt.freeze_hbnet)
             print(f"Loaded HBNet weights from {opt.weights}")
         else:
             print("WARNING: No pretrained weights found, HBNet randomly initialized")
@@ -108,6 +108,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--weights", type=str, default="./models/weights/gazenet_GAFA.pth",
         help="Path to pretrained GAFA checkpoint (for HBNet weights)"
+    )
+    parser.add_argument(
+        "--freeze_hbnet", action="store_true", default=True,
+        help="Freeze HBNet during training (prevent overfitting)"
+    )
+    parser.add_argument(
+        "--no_freeze_hbnet", action="store_false", dest="freeze_hbnet",
+        help="Allow HBNet fine-tuning"
     )
 
     # RHFD features

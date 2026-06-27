@@ -691,7 +691,8 @@ class SimpleRHFDGazeNet(pl.LightningModule):
 
         self.automatic_optimization = False
 
-    def load_pretrained_hbnet(self, checkpoint_path: str, map_location: str = 'cpu'):
+    def load_pretrained_hbnet(self, checkpoint_path: str, map_location: str = 'cpu',
+                              freeze: bool = False):
         """Load HBNet weights from original GAFA checkpoint."""
         state = torch.load(checkpoint_path, map_location=map_location)
         if 'state_dict' in state:
@@ -701,7 +702,12 @@ class SimpleRHFDGazeNet(pl.LightningModule):
             if k.startswith('hbnet.'):
                 hbnet_state[k[len('hbnet.'):]] = v
         self.hbnet.load_state_dict(hbnet_state, strict=True)
-        print(f"Loaded {len(hbnet_state)} HBNet parameters")
+        if freeze:
+            for p in self.hbnet.parameters():
+                p.requires_grad = False
+            print(f"Loaded {len(hbnet_state)} HBNet parameters (FROZEN)")
+        else:
+            print(f"Loaded {len(hbnet_state)} HBNet parameters")
         return self
 
     def forward(self, img, head_mask, body_dv):
